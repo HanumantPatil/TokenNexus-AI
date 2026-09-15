@@ -1,0 +1,65 @@
+{
+  "brdFile": "docs/brds/tokennexus-ai-framework-brd.md",
+  "lastAccessed": "2026-09-15T12:00:00Z",
+  "currentPhase": "validation",
+  "questionsAsked": [],
+  "answeredQuestions": {
+    "initiative-name": "TokenNexus-AI-Framework",
+    "business-problem": "Scale GenAI and agentic AI while optimizing business value per token",
+    "initiative-type": "Hackathon proof of concept",
+    "security-ux-tension": "James requires least privilege and auditability; Sarah requires session reuse, preserved work, and actionable low-friction errors",
+    "compliance-position": "Demonstrate mapped controls and evidence without claiming certification or legal compliance"
+  },
+  "referencesProcessed": [
+    {
+      "file": "workshop/assets/raw-requirements.md",
+      "status": "analyzed",
+      "keyFindings": "Value-driven model routing, context optimization, semantic caching, budget-aware orchestration, quality escalation, and a telemetry feedback loop"
+    },
+    {
+      "file": "stakeholder architecture image",
+      "status": "analyzed",
+      "keyFindings": "Five control-plane capabilities, five-stage runtime flow, enterprise application inputs, model and tool ecosystem, and business-impact measures"
+    },
+    {
+      "file": "NIST AI Risk Management Framework Core",
+      "status": "analyzed",
+      "keyFindings": "Govern, Map, Measure, and Manage outcomes require documented ownership, scope, metrics, human oversight, monitoring, and risk treatment"
+    },
+    {
+      "file": "European Commission GDPR legal framework",
+      "status": "analyzed",
+      "keyFindings": "Personal-data obligations are conditional on applicability and require legal review beyond MVP technical controls"
+    },
+    {
+      "file": "OWASP GenAI LLM Top 10 2026",
+      "status": "analyzed",
+      "keyFindings": "MVP controls should address untrusted prompts, sensitive disclosure, bounded tools, and resource consumption"
+    }
+  ],
+  "nextActions": [
+    "Confirm reference use case and evaluation dataset",
+    "Select model tiers and quality evaluator",
+    "Confirm budget and latency thresholds",
+    "Confirm James and Sarah roles and approve decision rules",
+    "Determine applicable jurisdictional and contractual compliance obligations",
+    "Assign requirement owners and approve scope"
+  ],
+  "qualityChecks": [
+    "objectives-defined",
+    "scope-clarified",
+    "stakeholder-tensions-reconciled",
+    "requirements-linked-to-objectives",
+    "acceptance-criteria-defined",
+    "risks-documented",
+    "metrics-have-targets-and-sample-sizes",
+    "security-ux-tension-explicitly-reconciled",
+    "mvp-future-boundary-defined",
+    "compliance-mapped-to-capabilities"
+  ],
+  "userPreferences": {
+    "detail-level": "comprehensive",
+    "question-style": "structured",
+    "delivery-context": "hackathon"
+  }
+}
