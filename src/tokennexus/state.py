@@ -6,7 +6,16 @@ from dataclasses import dataclass, replace
 from enum import StrEnum
 from uuid import UUID
 
-from tokennexus.contracts import ModelAlias, NormalizedRequest, PublicResult, QualitySummary, Usage
+from tokennexus.contracts import (
+    BudgetReservation,
+    ModelAlias,
+    NormalizedRequest,
+    PolicySnapshot,
+    PublicResult,
+    QualitySummary,
+    RouteBudgetDecision,
+    Usage,
+)
 
 
 class RunPhase(StrEnum):
@@ -43,6 +52,9 @@ class RunState:
     request: NormalizedRequest
     fingerprint: str
     deadline: float
+    policy_snapshot: PolicySnapshot | None = None
+    route_decision: RouteBudgetDecision | None = None
+    reservations: tuple[BudgetReservation, ...] = ()
     revision: int = 0
     phase: RunPhase = RunPhase.ADMITTED
     attempts: tuple[AttemptState, ...] = ()
@@ -61,6 +73,17 @@ def require_active(state: RunState) -> None:
     """Reject all mutations after the first terminal transition."""
     if state.is_terminal:
         raise StateTransitionError("terminal run state is immutable")
+
+
+def record_reservation(state: RunState, receipt: BudgetReservation) -> RunState:
+    """Append evidence authorizing one physical paid operation."""
+    require_active(state)
+    if any(
+        item.request.reservation_id == receipt.request.reservation_id
+        for item in state.reservations
+    ):
+        raise StateTransitionError("reservation evidence must be unique")
+    return replace(state, reservations=(*state.reservations, receipt))
 
 
 def begin_attempt(

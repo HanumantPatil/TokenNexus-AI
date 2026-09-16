@@ -6,9 +6,10 @@ description: Overview and requirements documentation for the TokenNexus-AI-Frame
 ## Overview
 
 TokenNexus-AI-Framework is a provider-neutral economics control plane for governed AI
-requests. It selects an economical model first, evaluates the result, and permits one
-capable-model escalation when quality, budget, cancellation, and deadline policy allow
-it. Deterministic policy code owns every routing and terminal-state decision.
+requests. It evaluates a frozen versioned policy before dispatch, selects the least
+expensive eligible model, and permits one capable-model escalation when quality,
+budget, cancellation, and deadline policy allow it. Deterministic policy code owns
+every routing and terminal-state decision.
 
 The current repository implements the synchronous orchestration core as a Python
 library with a dependency-free local HTTP host. It includes strict public contracts,
@@ -44,6 +45,8 @@ replace each protocol implementation without moving policy into infrastructure c
 | --- | --- |
 | `contracts.py` | Frozen Pydantic request, result, usage, money, quality, and RFC 9457 contracts |
 | `coordinator.py` | Admission, guards, reservations, dispatch, retry, quality evaluation, escalation, and terminalization |
+| `policy.py` | Pure versioned eligibility, pessimistic pricing, routing, and budget decisions |
+| `economics.py` | Atomic multidimensional reservations, immutable policy history, and audited administration |
 | `fingerprint.py` | Request normalization, RFC 8785 canonical JSON, and SHA-256 fingerprints |
 | `journal.py` | Atomic scoped idempotency claims, compare-and-set updates, and first-terminal-wins commits |
 | `state.py` | Immutable run and attempt state with guarded transition functions |
@@ -63,16 +66,17 @@ replace each protocol implementation without moving policy into infrastructure c
    8785 canonical JSON and SHA-256.
 4. `Journal.claim` atomically admits the scoped idempotency key, returns an existing
    run, or reports a fingerprint conflict.
-5. `Coordinator` checks cancellation and the absolute monotonic deadline before
-   controlled work.
-6. The budget port reserves worst-case cost before each model dispatch or quality
-   evaluation.
-7. The economical alias executes first. One centralized transient retry may be used
+5. `Coordinator` freezes the active policy and its pure route decision for the run.
+6. Ineligible or unfunded requests stop before any reservation or paid operation.
+7. The budget port atomically reserves worst-case cost, input tokens, output tokens,
+   duration, and tool calls before each model dispatch or quality evaluation.
+8. The selected alias executes directly. One centralized transient retry may be used
    across the request.
-8. The quality evaluator returns facts only. A below-threshold score can trigger one
-   capable-model attempt when the remaining policy constraints permit it.
-9. The coordinator creates a canonical UTC result and atomically commits the first
-   terminal state. Later exact replays return that stored result.
+9. The quality evaluator returns facts only. A below-threshold economical result can
+   trigger one capable-model attempt when the remaining policy constraints permit it.
+10. The coordinator creates a canonical UTC result and atomically commits the first
+    terminal state. Later exact replays return that stored result and its original
+    policy evidence, even after policy changes.
 
 ### Core Contracts
 
@@ -100,19 +104,37 @@ outside the public contract.
 * An active exact replay returns `in_progress`; changed content under the same key
   returns `conflict`.
 * Every paid operation follows a successful reservation with a stable operation key.
+* Reservations admit or deny cost, input tokens, output tokens, duration, and tool
+   calls as one atomic decision.
 * A request permits at most two model attempts and two quality evaluations.
 * A request permits at most one capable-model escalation and one transient retry.
 * Model and quality adapters report facts; they never choose routes or retry policy.
 * Cancellation and deadline checks occur before controlled work.
 * Late dependency results cannot overwrite a terminal run.
 * Public failures use registered safe reason codes rather than provider details.
+* Direct capable routing is not counted as escalation.
+* Policy updates require authorization, explicit confirmation, validation, and a
+   matching active version. Every attempt produces a safe audit event.
+* Rollback clones a prior approved snapshot into a new immutable policy version.
+
+### Public Economics API
+
+The package root exports `PolicySnapshot`, `ModelPolicy`, `PolicyEvaluator`,
+`RouteBudgetDecision`, `ReservationRequest`, `BudgetReservation`,
+`InMemoryBudgetLedger`, `InMemoryPolicyStore`, and
+`PolicyAdministrationService`. Callers can inject a `PolicyStore` into `Coordinator`;
+otherwise it uses the versioned pilot policy.
+
+`DecisionSummary` exposes the selected alias, policy and pricing versions, budget
+action, pessimistic cost estimate, and eligibility gates. Reservation receipts remain
+internal run evidence and are recorded before their corresponding physical calls.
 
 ### How Token Savings Work
 
 The implemented core reduces avoidable model work rather than truncating every prompt:
 
-* Economical-first routing avoids a capable-model call when the first result meets the
-  configured quality threshold.
+* Policy routing avoids a capable-model call when the economical alias satisfies the
+   request's criticality, quality, latency, and budget gates.
 * Scoped idempotency returns an existing terminal result without another model call,
   quality evaluation, or budget reservation.
 * One escalation and one centralized transient retry bound the maximum amount of
@@ -231,22 +253,54 @@ The current implementation uses deterministic, provider-neutral adapters and an
 in-memory journal. It does not connect to Azure, Microsoft Foundry, or another model
 provider, so no cloud credentials, API keys, or environment variables are required.
 
+The smoke client sends an `X-Scope-Id` header to demonstrate scoped idempotency. The
+local host does not treat this header as authentication. Production authentication and
+live provider credentials remain outside this local demo.
+
+## Prerequisites
+
+Use Windows PowerShell with these tools installed:
+
+* Python 3.11 or later for x64
+* `uv` for environment package installation
+
+Confirm the tools are available:
+
+```powershell
+py -3.11 --version
+uv --version
+```
+
+If `uv` is not installed, install it and reopen PowerShell if the command is not added
+to the current `PATH`:
+
+```powershell
+py -3.11 -m pip install --user uv
+```
+
 ## Local Development
 
-Install Python 3.11 and `uv`, then run these commands from the repository root in
-PowerShell:
+Run the one-time environment setup from the repository root. The editable package
+installation makes subsequent changes under `src/` available without reinstalling the
+project:
 
 ```powershell
 py -3.11 -m venv .venv-x64
 uv pip install --python .venv-x64\Scripts\python.exe --index-url https://packagefeedproxy.microsoft.io/pypi/simple/ -r requirements.txt
-uv pip install --python .venv-x64\Scripts\python.exe --no-deps --no-build-isolation .
+uv pip install --python .venv-x64\Scripts\python.exe --no-deps --no-build-isolation --editable .
+```
+
+Validate the environment:
+
+```powershell
 .venv-x64\Scripts\python.exe -m pytest -q
 .venv-x64\Scripts\ruff.exe check src tests test.py
 ```
 
 ### Run the Local Application
 
-Start the deterministic local HTTP application from the repository root:
+In the first PowerShell terminal, start the deterministic local HTTP application from
+the repository root:
 
 ```powershell
 .venv-x64\Scripts\python.exe -m tokennexus.local_app
@@ -263,7 +317,8 @@ It requires no credentials and does not call an external AI provider. Stop it wi
 
 ### Call the Application with the HTTP Client
 
-Keep the server running and open a second PowerShell terminal in the repository root:
+Keep the server running. In a second PowerShell terminal, run the smoke client from the
+repository root:
 
 ```powershell
 .venv-x64\Scripts\python.exe test.py
@@ -277,13 +332,3 @@ pass the same value to both commands:
 .venv-x64\Scripts\python.exe -m tokennexus.local_app --port 8080
 .venv-x64\Scripts\python.exe test.py --port 8080
 ```
-
-## Mermaid Preview Errors
-
-The message `No diagram type detected` means plain text was sent to a Mermaid renderer.
-The question "What credentials and environment setup do I need, and how do I run this
-locally?" is not Mermaid syntax. Open the README as Markdown, or submit that question
-to chat instead of the Mermaid preview command.
-
-Only fenced blocks beginning with a Mermaid diagram declaration should be sent to the
-Mermaid preview command.

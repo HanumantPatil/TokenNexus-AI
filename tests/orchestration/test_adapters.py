@@ -19,12 +19,14 @@ from tokennexus.adapters import (
     ScriptExhaustedError,
 )
 from tokennexus.contracts import (
+    BudgetReservation,
     Money,
     NormalizedRequest,
     Output,
     PublicRequest,
     PublicResult,
     QualitySummary,
+    ReservationRequest,
     Task,
     Usage,
 )
@@ -69,17 +71,11 @@ class AllowAllBudget:
     """Allow and record every coordinator reservation."""
 
     def __init__(self) -> None:
-        self.calls: list[tuple[UUID, str, Money]] = []
+        self.calls: list[ReservationRequest] = []
 
-    def reserve(
-        self,
-        *,
-        request_id: UUID,
-        operation_key: str,
-        estimated_cost: Money,
-    ) -> bool:
-        self.calls.append((request_id, operation_key, estimated_cost))
-        return True
+    def reserve(self, request: ReservationRequest) -> BudgetReservation:
+        self.calls.append(request)
+        return BudgetReservation(request=request)
 
 
 class NeverCancelled:

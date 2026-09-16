@@ -8,6 +8,7 @@ from decimal import Decimal
 from uuid import UUID
 
 from tokennexus.contracts import (
+    BudgetReservation,
     DecisionSummary,
     EscalationStatus,
     ModelAlias,
@@ -17,10 +18,14 @@ from tokennexus.contracts import (
     PublicRequest,
     PublicResult,
     QualitySummary,
+    ReservationRequest,
+    RouteBudgetDecision,
     Usage,
 )
+from tokennexus.economics import InMemoryPolicyStore
 from tokennexus.fingerprint import normalize_request, request_fingerprint
 from tokennexus.journal import ClaimStatus, Journal
+from tokennexus.policy import PolicyEvaluator, pilot_policy
 from tokennexus.ports import (
     BudgetPort,
     CancellationPort,
@@ -30,6 +35,7 @@ from tokennexus.ports import (
     ModelOutcome,
     ModelOutcomeStatus,
     ModelPort,
+    PolicyStore,
     QualityEvaluator,
     TransientDependencyError,
 )
@@ -42,6 +48,7 @@ from tokennexus.state import (
     record_dispatch,
     record_model_success,
     record_quality,
+    record_reservation,
 )
 
 
@@ -73,6 +80,8 @@ class Coordinator:
         cancellation: CancellationPort,
         clock: Clock,
         ids: IdSource,
+        policy_store: PolicyStore | None = None,
+        policy_evaluator: PolicyEvaluator | None = None,
     ) -> None:
         self._journal = journal
         self._budget = budget
@@ -81,6 +90,8 @@ class Coordinator:
         self._cancellation = cancellation
         self._clock = clock
         self._ids = ids
+        self._policy_store = policy_store or InMemoryPolicyStore(pilot_policy())
+        self._policy_evaluator = policy_evaluator or PolicyEvaluator()
 
     def execute(self, request: PublicRequest, *, scope_id: str) -> PublicResult:
         """Execute a request once or return its exact stored terminal replay."""
@@ -88,7 +99,15 @@ class Coordinator:
         normalized = normalize_request(request, scope_id=scope_id, request_id=self._ids.new())
         fingerprint = request_fingerprint(normalized)
         deadline = started_at + request.constraints.maximum_latency_ms / 1_000
-        initial = RunState(request=normalized, fingerprint=fingerprint, deadline=deadline)
+        policy_snapshot = self._policy_store.active()
+        route_decision = self._policy_evaluator.evaluate(policy_snapshot, normalized)
+        initial = RunState(
+            request=normalized,
+            fingerprint=fingerprint,
+            deadline=deadline,
+            policy_snapshot=policy_snapshot,
+            route_decision=route_decision,
+        )
         claim = self._journal.claim(
             scope_id=scope_id,
             idempotency_key=request.idempotency_key,
@@ -123,11 +142,25 @@ class Coordinator:
         if guarded is not None:
             return guarded
 
+        decision = self._require_route_decision(state)
+        if decision.selected_model_alias is None:
+            return self._finish(
+                state,
+                request.idempotency_key,
+                self._result(
+                    state,
+                    status=PublicStatus.BLOCKED,
+                    started_at=started_at,
+                    reasons=decision.public_reason_codes,
+                ),
+            )
+        first_alias = decision.selected_model_alias
+
         first = self._execute_attempt(
             state,
             request.idempotency_key,
             started_at,
-            model_alias="economical",
+            model_alias=first_alias,
             parent_attempt_id=None,
         )
         if first.terminal_result is not None:
@@ -164,7 +197,7 @@ class Coordinator:
                     status=PublicStatus.DEGRADED,
                     started_at=started_at,
                     output=outcome.output,
-                    model_alias="economical",
+                    model_alias=first_alias,
                     quality=QualitySummary(
                         status="unavailable",
                         threshold=request.constraints.minimum_quality,
@@ -178,9 +211,28 @@ class Coordinator:
                 request.idempotency_key,
                 started_at,
                 outcome.output,
-                "economical",
+                first_alias,
                 quality,
                 escalated=False,
+            )
+
+        if first_alias == "capable":
+            return self._finish(
+                state,
+                request.idempotency_key,
+                self._result(
+                    state,
+                    status=PublicStatus.QUALITY_UNMET,
+                    started_at=started_at,
+                    output=outcome.output,
+                    model_alias="capable",
+                    quality=quality,
+                    reasons=(
+                        "budget.within_limit",
+                        "quality.threshold_unmet",
+                        "route.capable_required",
+                    ),
+                ),
             )
 
         guarded = self._guard(state, request.idempotency_key, started_at)
@@ -287,16 +339,23 @@ class Coordinator:
         attempt_id = self._ids.new()
         operation_key = str(self._ids.new())
         estimate = self._model.estimate_cost(state.request, model_alias)
-        if not self._budget.reserve(
-            request_id=state.request.request_id,
+        receipt = self._reserve(
+            state,
             operation_key=operation_key,
+            dispatch_ordinal=1,
             estimated_cost=estimate,
-        ):
+        )
+        if receipt is None:
             return _AttemptExecution(state=state, budget_denied=True)
+        state = self._update(
+            state,
+            idempotency_key,
+            record_reservation(state, receipt),
+        )
         guarded = self._guard(state, idempotency_key, started_at)
         if guarded is not None:
             return _AttemptExecution(state=state, terminal_result=guarded)
-        if model_alias == "capable":
+        if parent_attempt_id is not None:
             state = self._update(state, idempotency_key, approve_escalation(state))
         state = self._update(
             state,
@@ -360,11 +419,13 @@ class Coordinator:
             guarded = self._guard(state, idempotency_key, started_at)
             if guarded is not None:
                 return _AttemptExecution(state=state, terminal_result=guarded)
-            if not self._budget.reserve(
-                request_id=state.request.request_id,
+            receipt = self._reserve(
+                state,
                 operation_key=operation_key,
+                dispatch_ordinal=dispatch_ordinal + 1,
                 estimated_cost=estimate,
-            ):
+            )
+            if receipt is None:
                 result = self._result(
                     state,
                     status=PublicStatus.FAILED,
@@ -375,6 +436,11 @@ class Coordinator:
                     state=state,
                     terminal_result=self._finish(state, idempotency_key, result),
                 )
+            state = self._update(
+                state,
+                idempotency_key,
+                record_reservation(state, receipt),
+            )
             guarded = self._guard(state, idempotency_key, started_at)
             if guarded is not None:
                 return _AttemptExecution(state=state, terminal_result=guarded)
@@ -390,16 +456,25 @@ class Coordinator:
             raise ValueError("quality evaluation requires model output")
         operation_key = str(self._ids.new())
         estimate = self._quality.estimate_cost(state.request, output)
+        dispatch_ordinal = 0
         while True:
             guarded = self._guard(state, idempotency_key, started_at)
             if guarded is not None:
                 return _QualityExecution(state=state, terminal_result=guarded)
-            if not self._budget.reserve(
-                request_id=state.request.request_id,
+            dispatch_ordinal += 1
+            receipt = self._reserve(
+                state,
                 operation_key=operation_key,
+                dispatch_ordinal=dispatch_ordinal,
                 estimated_cost=estimate,
-            ):
+            )
+            if receipt is None:
                 return _QualityExecution(state=state)
+            state = self._update(
+                state,
+                idempotency_key,
+                record_reservation(state, receipt),
+            )
             guarded = self._guard(state, idempotency_key, started_at)
             if guarded is not None:
                 return _QualityExecution(state=state, terminal_result=guarded)
@@ -415,6 +490,31 @@ class Coordinator:
                 return _QualityExecution(state=state, terminal_result=guarded)
             state = self._update(state, idempotency_key, record_quality(state, quality))
             return _QualityExecution(state=state, quality=quality)
+
+    def _reserve(
+        self,
+        state: RunState,
+        *,
+        operation_key: str,
+        dispatch_ordinal: int,
+        estimated_cost: Money,
+    ) -> BudgetReservation | None:
+        decision = self._require_route_decision(state)
+        constraints = state.request.effective_constraints
+        return self._budget.reserve(
+            ReservationRequest(
+                reservation_id=self._ids.new(),
+                request_id=state.request.request_id,
+                operation_key=operation_key,
+                dispatch_ordinal=dispatch_ordinal,
+                pricing_version=decision.pricing_version,
+                estimated_cost=estimated_cost,
+                input_tokens=constraints.maximum_input_tokens,
+                output_tokens=constraints.maximum_output_tokens,
+                duration_ms=constraints.maximum_latency_ms,
+                tool_calls=constraints.maximum_tool_calls,
+            )
+        )
 
     def _guard(
         self,
@@ -458,7 +558,11 @@ class Coordinator:
         escalated: bool,
     ) -> PublicResult:
         reasons = ["budget.within_limit", "quality.threshold_met"]
-        reasons.append("route.capable_required" if escalated else "route.economical_eligible")
+        reasons.append(
+            "route.capable_required"
+            if model_alias == "capable"
+            else "route.economical_eligible"
+        )
         if escalated:
             reasons.append("escalation.quality_triggered")
         result = self._result(
@@ -529,6 +633,31 @@ class Coordinator:
             error=error,
             decision_summary=DecisionSummary(
                 model_alias=model_alias,
+                policy_version=(
+                    state.route_decision.policy_version
+                    if state.route_decision is not None
+                    else None
+                ),
+                pricing_version=(
+                    state.route_decision.pricing_version
+                    if state.route_decision is not None
+                    else None
+                ),
+                budget_action=(
+                    state.route_decision.budget_action
+                    if state.route_decision is not None
+                    else None
+                ),
+                estimated_cost=(
+                    state.route_decision.selected_estimate
+                    if state.route_decision is not None
+                    else None
+                ),
+                eligibility_gates=(
+                    state.route_decision.eligibility_gates
+                    if state.route_decision is not None
+                    else ()
+                ),
                 usage=self._total_usage(state),
                 end_to_end_latency_ms=self._elapsed_ms(started_at),
                 quality=quality,
@@ -551,6 +680,12 @@ class Coordinator:
         if outcome is None or outcome.status != ModelOutcomeStatus.SUCCEEDED:
             raise RuntimeError("attempt execution did not produce a successful outcome")
         return outcome
+
+    @staticmethod
+    def _require_route_decision(state: RunState) -> RouteBudgetDecision:
+        if state.route_decision is None:
+            raise RuntimeError("run state omitted its frozen route decision")
+        return state.route_decision
 
     @staticmethod
     def _total_usage(state: RunState) -> Usage | None:

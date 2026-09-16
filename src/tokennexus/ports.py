@@ -10,11 +10,15 @@ from typing import Protocol
 from uuid import UUID
 
 from tokennexus.contracts import (
+    BudgetReservation,
     ModelAlias,
     Money,
     NormalizedRequest,
     Output,
+    PolicyAuditEvent,
+    PolicySnapshot,
     QualitySummary,
+    ReservationRequest,
     Usage,
 )
 from tokennexus.ids import new_uuid7
@@ -54,12 +58,35 @@ class BudgetPort(Protocol):
 
     def reserve(
         self,
+        request: ReservationRequest,
+    ) -> BudgetReservation | None:
+        """Atomically reserve every allowance dimension or deny the operation."""
+        raise NotImplementedError
+
+
+class PolicyStore(Protocol):
+    """Read approved immutable policy history and atomically append transitions."""
+
+    def active(self) -> PolicySnapshot:
+        """Return the current approved snapshot."""
+        raise NotImplementedError
+
+    def get(self, policy_version: str) -> PolicySnapshot | None:
+        """Return an approved snapshot by version."""
+        raise NotImplementedError
+
+    def transition(
+        self,
         *,
-        request_id: UUID,
-        operation_key: str,
-        estimated_cost: Money,
+        expected_active_version: str,
+        snapshot: PolicySnapshot,
+        audit_event: PolicyAuditEvent,
     ) -> bool:
-        """Reserve allowance once and return whether the operation may proceed."""
+        """Atomically append a unique snapshot, audit event, and active pointer."""
+        raise NotImplementedError
+
+    def record_audit(self, audit_event: PolicyAuditEvent) -> None:
+        """Append an audit event that does not change policy history."""
         raise NotImplementedError
 
 

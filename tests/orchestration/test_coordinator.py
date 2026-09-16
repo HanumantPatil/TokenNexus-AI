@@ -8,19 +8,25 @@ from uuid import UUID
 import pytest
 
 from tokennexus.contracts import (
+    BudgetReservation,
     ModelAlias,
     Money,
     NormalizedRequest,
     Output,
+    PolicyChangeCommand,
     PublicRequest,
     QualitySummary,
+    RequestConstraints,
+    ReservationRequest,
     Task,
     Usage,
 )
 from tokennexus.coordinator import Coordinator
+from tokennexus.economics import InMemoryPolicyStore, PolicyAdministrationService
 from tokennexus.fingerprint import normalize_request, request_fingerprint
 from tokennexus.ids import new_uuid7
 from tokennexus.journal import InMemoryJournal
+from tokennexus.policy import pilot_policy
 from tokennexus.ports import ModelInvocation, ModelOutcome, ModelOutcomeStatus
 from tokennexus.reasons import PublicStatus
 from tokennexus.state import RunPhase, RunState, StateTransitionError
@@ -67,19 +73,14 @@ class FakeBudget:
 
     def __init__(self, *decisions: bool, events: list[str] | None = None) -> None:
         self._decisions = deque(decisions)
-        self.calls: list[tuple[UUID, str, Money]] = []
+        self.calls: list[ReservationRequest] = []
         self.events = events if events is not None else []
 
-    def reserve(
-        self,
-        *,
-        request_id: UUID,
-        operation_key: str,
-        estimated_cost: Money,
-    ) -> bool:
+    def reserve(self, request: ReservationRequest) -> BudgetReservation | None:
         self.events.append("reserve")
-        self.calls.append((request_id, operation_key, estimated_cost))
-        return self._decisions.popleft() if self._decisions else True
+        self.calls.append(request)
+        admitted = self._decisions.popleft() if self._decisions else True
+        return BudgetReservation(request=request) if admitted else None
 
 
 class FakeModel:
@@ -149,6 +150,7 @@ def coordinator(
     quality: FakeQuality,
     cancellation: FakeCancellation | None = None,
     clock: FakeClock | None = None,
+    policy_store: InMemoryPolicyStore | None = None,
 ) -> Coordinator:
     """Build a coordinator with inspectable synchronous dependencies."""
     return Coordinator(
@@ -159,6 +161,7 @@ def coordinator(
         cancellation=cancellation or FakeCancellation(),
         clock=clock or FakeClock(),
         ids=FakeIds(),
+        policy_store=policy_store,
     )
 
 
@@ -181,6 +184,127 @@ def test_given_routine_request_when_executed_then_economical_result_completes_on
     assert [call.model_alias for call in model.calls] == ["economical"]
     assert len(quality.calls) == 1
     assert events == ["reserve", "model", "reserve", "quality"]
+
+
+def test_given_critical_request_when_executed_then_capable_runs_without_escalation() -> None:
+    # Arrange
+    journal = InMemoryJournal()
+    budget = FakeBudget()
+    model = FakeModel([successful_outcome()])
+    quality = FakeQuality([QualitySummary(status="passed", score="5")])
+    service = coordinator(journal=journal, budget=budget, model=model, quality=quality)
+    critical_request = PublicRequest(
+        idempotency_key="critical-request",
+        application_id="claims-assistant",
+        task=Task(content="Review the approved evidence."),
+        constraints=RequestConstraints(
+            criticality="critical",
+            maximum_budget=Money(amount="1"),
+        ),
+    )
+
+    # Act
+    result = service.execute(critical_request, scope_id="tenant-a")
+    state = journal.read(scope_id="tenant-a", idempotency_key="critical-request")
+
+    # Assert
+    assert result.status == PublicStatus.COMPLETED
+    assert result.decision_summary.model_alias == "capable"
+    assert result.decision_summary.escalation_status == "not_required"
+    assert result.decision_summary.public_reason_codes == (
+        "budget.within_limit",
+        "quality.threshold_met",
+        "route.capable_required",
+    )
+    assert [call.model_alias for call in model.calls] == ["capable"]
+    assert state is not None
+    assert state.escalation_count == 0
+
+
+def test_given_unfunded_request_when_executed_then_policy_blocks_before_dispatch() -> None:
+    # Arrange
+    journal = InMemoryJournal()
+    budget = FakeBudget()
+    model = FakeModel([])
+    quality = FakeQuality([])
+    service = coordinator(journal=journal, budget=budget, model=model, quality=quality)
+    unfunded_request = PublicRequest(
+        idempotency_key="unfunded-request",
+        application_id="claims-assistant",
+        task=Task(content="Review the approved evidence."),
+        constraints=RequestConstraints(maximum_budget=Money(amount="0")),
+    )
+
+    # Act
+    result = service.execute(unfunded_request, scope_id="tenant-a")
+
+    # Assert
+    assert result.status == PublicStatus.BLOCKED
+    assert result.decision_summary.budget_action == "block"
+    assert result.decision_summary.public_reason_codes == (
+        "budget.limit_exceeded",
+    )
+    assert budget.calls == []
+    assert model.calls == []
+    assert quality.calls == []
+
+
+@pytest.mark.parametrize(
+    ("criticality", "minimum_quality", "latency_ms", "budget_amount", "expected_alias"),
+    [
+        ("high", "4", 10_000, "0.015", "economical"),
+        ("high", "4", 200, "0.015", "economical"),
+        ("high", "5", 10_000, "0.015", None),
+        ("critical", "4", 10_000, "0.015", None),
+        ("standard", "4", 10_000, "0.005", None),
+    ],
+)
+def test_given_over_budget_request_when_executed_then_disallowed_alias_never_dispatches(
+    criticality: str,
+    minimum_quality: str,
+    latency_ms: int,
+    budget_amount: str,
+    expected_alias: ModelAlias | None,
+) -> None:
+    # Arrange
+    journal = InMemoryJournal()
+    budget = FakeBudget()
+    outcomes = [successful_outcome()] if expected_alias is not None else []
+    qualities = (
+        [QualitySummary(status="passed", score="5")]
+        if expected_alias is not None
+        else []
+    )
+    model = FakeModel(outcomes)
+    quality = FakeQuality(qualities)
+    service = coordinator(journal=journal, budget=budget, model=model, quality=quality)
+    over_budget_request = PublicRequest(
+        idempotency_key=(
+            f"over-budget-{criticality}-{minimum_quality}-{latency_ms}-{budget_amount}"
+        ),
+        application_id="claims-assistant",
+        task=Task(content="Review the approved evidence."),
+        constraints=RequestConstraints(
+            criticality=criticality,
+            minimum_quality=minimum_quality,
+            maximum_latency_ms=latency_ms,
+            maximum_budget=Money(amount=budget_amount),
+        ),
+    )
+
+    # Act
+    result = service.execute(over_budget_request, scope_id="tenant-a")
+
+    # Assert
+    if expected_alias is None:
+        assert result.status == PublicStatus.BLOCKED
+        assert model.calls == []
+        assert budget.calls == []
+    else:
+        assert result.status == PublicStatus.COMPLETED
+        assert result.decision_summary.budget_action == "downgrade"
+        assert [call.model_alias for call in model.calls] == [expected_alias]
+        assert "capable" not in {call.model_alias for call in model.calls}
 
 
 def test_given_terminal_request_when_replayed_then_exact_result_has_no_new_effects() -> None:
@@ -206,6 +330,76 @@ def test_given_terminal_request_when_replayed_then_exact_result_has_no_new_effec
     assert len(model.calls) == 1
     assert len(quality.calls) == 1
     assert len(budget.calls) == 2
+
+
+def test_given_policy_update_when_replayed_then_original_evidence_is_exact() -> None:
+    # Arrange
+    initial_policy = pilot_policy()
+    policy_store = InMemoryPolicyStore(initial_policy)
+    budget = FakeBudget()
+    model = FakeModel([successful_outcome("Original."), successful_outcome("Updated.")])
+    quality = FakeQuality(
+        [
+            QualitySummary(status="passed", score="5"),
+            QualitySummary(status="passed", score="5"),
+        ]
+    )
+    service = coordinator(
+        journal=InMemoryJournal(),
+        budget=budget,
+        model=model,
+        quality=quality,
+        policy_store=policy_store,
+    )
+    original = service.execute(request(), scope_id="tenant-a")
+    economical, capable = initial_policy.models
+    updated_policy = initial_policy.model_copy(
+        update={
+            "policy_version": "pilot-2",
+            "models": (
+                economical.model_copy(update={"enabled": False}),
+                capable.model_copy(
+                    update={
+                        "supported_criticalities": ("standard", "high", "critical"),
+                    }
+                ),
+            ),
+        }
+    )
+    administration = PolicyAdministrationService(
+        store=policy_store,
+        clock=FakeClock(),
+        ids=FakeIds(),
+    )
+    assert administration.update(
+        PolicyChangeCommand(
+            expected_active_version="pilot-1",
+            proposed_policy=updated_policy,
+            confirmed=True,
+        ),
+        actor_id="administrator",
+        actor_roles=frozenset({"policy_admin"}),
+    )
+
+    # Act
+    replay = service.execute(request(), scope_id="tenant-a")
+    updated = service.execute(
+        PublicRequest(
+            idempotency_key="request-002",
+            application_id="claims-assistant",
+            task=Task(content="Summarize the evidence."),
+        ),
+        scope_id="tenant-a",
+    )
+
+    # Assert
+    assert replay is original
+    assert replay.decision_summary.policy_version == "pilot-1"
+    assert replay.decision_summary.model_alias == "economical"
+    assert updated.decision_summary.policy_version == "pilot-2"
+    assert updated.decision_summary.model_alias == "capable"
+    assert [call.model_alias for call in model.calls] == ["economical", "capable"]
+    assert len(budget.calls) == 4
 
 
 def test_given_active_replay_when_executed_then_in_progress_has_original_id_and_no_effects(

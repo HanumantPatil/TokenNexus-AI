@@ -8,9 +8,9 @@ ms.topic: concept
 ## Scope
 
 The TokenNexus core accepts strict, versioned requests and produces provider-neutral
-terminal results. An application-owned coordinator controls admission, budget
-reservation, model dispatch, quality evaluation, retry, escalation, cancellation,
-deadlines, and terminalization.
+terminal results. An application-owned coordinator freezes policy at admission and
+controls budget reservation, model dispatch, quality evaluation, retry, escalation,
+cancellation, deadlines, and terminalization.
 
 The current package is an executable core, not an HTTP service. It includes an
 in-memory journal and deterministic model and quality substitutes so policy behavior
@@ -41,23 +41,49 @@ against another package index:
 3. `request_fingerprint` applies RFC 8785 canonical JSON and SHA-256.
 4. `Journal.claim` atomically admits a scoped idempotency key, returns an exact replay,
    or reports a fingerprint conflict.
-5. `Coordinator` checks cancellation and the absolute deadline before controlled work.
-6. The coordinator reserves budget before every model or quality operation.
-7. The economical alias runs first. Low quality can trigger one capable-model
-   escalation.
-8. The first terminal result wins and becomes immutable for every later replay.
+5. `Coordinator` freezes the active `PolicySnapshot` and evaluates every candidate's
+   availability, governance, quality, latency, and budget gates.
+6. A request with no eligible funded alias terminates before any paid operation.
+7. The coordinator reserves cost, input tokens, output tokens, duration, and tool
+   calls atomically before every model or quality operation.
+8. The selected alias runs directly. Low quality from an economical attempt can
+   trigger one capable-model escalation.
+9. The first terminal result wins and becomes immutable for every later replay.
 
 ## Invariants
 
 * Exact replays return the stored terminal object without another paid operation.
 * A changed fingerprint under the same scope and key conflicts before execution.
 * Every model dispatch and quality evaluation follows a successful budget reservation.
+* Every reservation covers all five allowance dimensions as one atomic decision.
 * One request permits at most two model attempts and two quality evaluations.
 * One request permits at most one capable-model escalation.
 * One centralized transient model retry is available across the entire request.
 * Late results cannot mutate cancelled, timed-out, or otherwise terminal runs.
 * Model and quality ports report facts. They do not select routes or retry internally.
 * Public reason codes come from the closed registry in `tokennexus.reasons`.
+* A direct capable route does not consume the one-escalation allowance.
+* Exact replay preserves the policy and pricing versions frozen by the original run.
+
+## Policy administration
+
+`InMemoryPolicyStore` retains immutable approved snapshots and an append-only audit
+journal. `PolicyAdministrationService` requires the `policy_admin` role, explicit
+confirmation, a valid `PolicySnapshot`, and an expected active version before an
+update can commit. Denied and conflicting attempts are audited without changing the
+active snapshot.
+
+Rollback never reactivates or mutates an old object. It clones a prior approved
+snapshot under a new version and commits it through the same optimistic transition.
+Audit records hash actor identifiers and expose only registered safe reason codes.
+
+## Reservation evidence
+
+`ReservationRequest` records the request identifier, operation key, dispatch ordinal,
+pricing version, pessimistic cost, and all bounded resource dimensions.
+`BudgetReservation` is the immutable receipt recorded in `RunState` before the
+physical operation. The in-memory ledger rejects a reservation without consuming any
+dimension when one aggregate limit would be exceeded.
 
 ## Deterministic substitutes
 

@@ -7,15 +7,16 @@ import json
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import ClassVar
-from uuid import UUID
 
 from pydantic import ValidationError
 
 from tokennexus.contracts import (
+    BudgetReservation,
     Money,
     NormalizedRequest,
     Output,
     QualitySummary,
+    ReservationRequest,
     Usage,
     parse_public_request_json,
 )
@@ -41,15 +42,8 @@ MAX_REQUEST_BYTES = 1_000_000
 class LocalBudget:
     """Allow all reservations for local deterministic execution."""
 
-    def reserve(
-        self,
-        *,
-        request_id: UUID,
-        operation_key: str,
-        estimated_cost: Money,
-    ) -> bool:
-        del request_id, operation_key, estimated_cost
-        return True
+    def reserve(self, request: ReservationRequest) -> BudgetReservation:
+        return BudgetReservation(request=request)
 
 
 class LocalModel:

@@ -95,6 +95,18 @@ _REASONS = (
         message="No eligible execution path fits the request budget.",
     ),
     _reason(
+        "budget.downgraded",
+        (PublicStatus.COMPLETED, PublicStatus.DEGRADED, PublicStatus.QUALITY_UNMET),
+        title="Budget route downgraded",
+        message="A lower-cost eligible route was selected to remain within budget.",
+    ),
+    _reason(
+        "budget.approval_required",
+        (PublicStatus.BLOCKED,),
+        title="Budget approval required",
+        message="The request requires approval before paid execution can begin.",
+    ),
+    _reason(
         "route.economical_eligible",
         (PublicStatus.COMPLETED, PublicStatus.DEGRADED, PublicStatus.QUALITY_UNMET),
         title="Economical route eligible",
@@ -105,6 +117,42 @@ _REASONS = (
         (PublicStatus.COMPLETED, PublicStatus.DEGRADED, PublicStatus.QUALITY_UNMET),
         title="Capable route required",
         message="The capable model tier was required by governed routing.",
+    ),
+    _reason(
+        "policy.updated",
+        (PublicStatus.COMPLETED,),
+        title="Policy updated",
+        message="The confirmed policy update was applied.",
+    ),
+    _reason(
+        "policy.rolled_back",
+        (PublicStatus.COMPLETED,),
+        title="Policy rolled back",
+        message="The confirmed policy rollback was applied as a new version.",
+    ),
+    _reason(
+        "policy.unauthorized",
+        (PublicStatus.BLOCKED,),
+        title="Policy change unauthorized",
+        message="The actor is not authorized to administer policy.",
+    ),
+    _reason(
+        "policy.confirmation_required",
+        (PublicStatus.BLOCKED,),
+        title="Policy confirmation required",
+        message="Explicit confirmation is required for policy administration.",
+    ),
+    _reason(
+        "policy.invalid_change",
+        (PublicStatus.REJECTED,),
+        title="Invalid policy change",
+        message="The proposed policy transition is invalid.",
+    ),
+    _reason(
+        "policy.version_conflict",
+        (PublicStatus.CONFLICT,),
+        title="Policy version conflict",
+        message="The active policy changed before the transition was applied.",
     ),
     _reason(
         "quality.threshold_met",

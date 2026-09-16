@@ -34,6 +34,11 @@ PublicReasonCode = Annotated[str, AfterValidator(ensure_registered_reason)]
 ContractVersion = Literal["1.0.0"]
 ModelAlias = Literal["economical", "capable"]
 EscalationStatus = Literal["not_required", "performed", "not_permitted"]
+BudgetAction = Literal["allow", "downgrade", "approval_required", "block"]
+EligibilityGateName = Literal["quality", "latency", "governance", "availability", "budget"]
+EligibilityOutcome = Literal["passed", "failed", "not_evaluated"]
+ReservationStatus = Literal["active", "settled", "released"]
+PolicyAction = Literal["update", "rollback"]
 
 
 def validate_canonical_utc_timestamp(value: object) -> str:
@@ -103,6 +108,150 @@ class Money(ContractModel):
             field_name="amount",
             minimum=Decimal(0),
         )
+
+
+class EligibilityGate(ContractModel):
+    """Safe outcome of one closed routing eligibility check."""
+
+    gate: EligibilityGateName
+    outcome: EligibilityOutcome
+
+
+class ModelPolicy(ContractModel):
+    """Frozen eligibility and pricing facts for one stable model alias."""
+
+    alias: ModelAlias
+    enabled: bool = True
+    supported_criticalities: tuple[Literal["standard", "high", "critical"], ...]
+    maximum_supported_quality: str
+    minimum_latency_ms: int = Field(ge=1, le=300_000)
+    input_cost_per_1000_tokens: str
+    output_cost_per_1000_tokens: str
+
+    @field_validator(
+        "maximum_supported_quality",
+        "input_cost_per_1000_tokens",
+        "output_cost_per_1000_tokens",
+    )
+    @classmethod
+    def validate_policy_decimal(cls, value: object, info: object) -> str:
+        """Require canonical non-negative policy decimal values."""
+        field_name = getattr(info, "field_name", "policy value")
+        maximum = Decimal(5) if field_name == "maximum_supported_quality" else None
+        minimum = Decimal(1) if field_name == "maximum_supported_quality" else Decimal(0)
+        return validate_canonical_decimal(
+            value,
+            field_name=field_name,
+            minimum=minimum,
+            maximum=maximum,
+        )
+
+    @field_validator("supported_criticalities")
+    @classmethod
+    def validate_supported_criticalities(
+        cls,
+        value: tuple[str, ...],
+    ) -> tuple[str, ...]:
+        """Reject duplicate criticality entries."""
+        if not value or len(value) != len(set(value)):
+            raise ValueError("supported_criticalities must be non-empty and unique")
+        return value
+
+
+class PolicySnapshot(ContractModel):
+    """Immutable approved routing and pricing policy used for one admission."""
+
+    policy_version: Annotated[str, StringConstraints(min_length=1, max_length=128)]
+    pricing_version: Annotated[str, StringConstraints(min_length=1, max_length=128)]
+    models: tuple[ModelPolicy, ...]
+    capable_preferred_criticalities: tuple[Literal["high", "critical"], ...] = (
+        "high",
+        "critical",
+    )
+    approval_required_when_unfunded: bool = False
+
+    @model_validator(mode="after")
+    def validate_aliases(self) -> PolicySnapshot:
+        """Require exactly one policy entry for each stable model alias."""
+        aliases = tuple(model.alias for model in self.models)
+        if len(aliases) != len(set(aliases)):
+            raise ValueError("policy model aliases must be unique")
+        if set(aliases) != {"economical", "capable"}:
+            raise ValueError("policy must define economical and capable aliases")
+        return self
+
+
+class CandidateEstimate(ContractModel):
+    """Pessimistic cost and eligibility evidence for one candidate alias."""
+
+    model_alias: ModelAlias
+    estimated_cost: Money
+    eligibility_gates: tuple[EligibilityGate, ...]
+
+
+class RouteBudgetDecision(ContractModel):
+    """Deterministic admission decision produced without paid work."""
+
+    policy_version: Annotated[str, StringConstraints(min_length=1, max_length=128)]
+    pricing_version: Annotated[str, StringConstraints(min_length=1, max_length=128)]
+    selected_model_alias: ModelAlias | None = None
+    budget_action: BudgetAction
+    candidate_estimates: tuple[CandidateEstimate, ...]
+    selected_estimate: Money | None = None
+    eligibility_gates: tuple[EligibilityGate, ...]
+    public_reason_codes: tuple[PublicReasonCode, ...]
+
+    @field_validator("public_reason_codes")
+    @classmethod
+    def validate_decision_reasons(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        """Reject duplicates and return deterministic public reasons."""
+        if not value or len(value) != len(set(value)):
+            raise ValueError("decision public_reason_codes must be non-empty and unique")
+        return tuple(sorted(value))
+
+
+class ReservationRequest(ContractModel):
+    """Worst-case allowance required before one physical paid operation."""
+
+    reservation_id: UUID
+    request_id: UUID
+    operation_key: Annotated[str, StringConstraints(min_length=1, max_length=256)]
+    dispatch_ordinal: int = Field(ge=1)
+    pricing_version: Annotated[str, StringConstraints(min_length=1, max_length=128)]
+    estimated_cost: Money
+    input_tokens: int = Field(ge=0, le=1_000_000)
+    output_tokens: int = Field(ge=0, le=100_000)
+    duration_ms: int = Field(ge=0, le=300_000)
+    tool_calls: int = Field(ge=0, le=100)
+
+
+class BudgetReservation(ContractModel):
+    """Immutable receipt proving allowance existed before an operation."""
+
+    request: ReservationRequest
+    status: ReservationStatus = "active"
+
+
+class PolicyChangeCommand(ContractModel):
+    """Confirmed optimistic command for an immutable policy update."""
+
+    expected_active_version: Annotated[str, StringConstraints(min_length=1, max_length=128)]
+    proposed_policy: PolicySnapshot
+    confirmed: bool
+
+
+class PolicyAuditEvent(ContractModel):
+    """Safe immutable record of one policy administration attempt."""
+
+    event_id: UUID
+    action: PolicyAction
+    actor_id_hash: Annotated[str, StringConstraints(pattern=r"^sha256:[0-9a-f]{64}$")]
+    outcome: Literal["applied", "denied", "invalid", "conflict"]
+    previous_version: str
+    source_version: str | None = None
+    resulting_version: str | None = None
+    public_reason_code: PublicReasonCode
+    recorded_at_utc: CanonicalUtcTimestamp
 
 
 class MandatoryContext(ContractModel):
@@ -266,6 +415,11 @@ class DecisionSummary(ContractModel):
     """Safe, deterministic explanation of a terminal decision."""
 
     model_alias: ModelAlias | None = None
+    policy_version: str | None = None
+    pricing_version: str | None = None
+    budget_action: BudgetAction | None = None
+    estimated_cost: Money | None = None
+    eligibility_gates: tuple[EligibilityGate, ...] = ()
     usage: Usage | None = None
     end_to_end_latency_ms: int = Field(ge=0, le=600_000)
     quality: QualitySummary | None = None
