@@ -1,0 +1,17 @@
+
+35 issues created: epics #1-#8, user stories #9-#35
+All 11 labels present
+24 P0 stories marked with P0 and P0-must-have
+MVP Sprint milestone created, assigned to 32 P0 issues
+All 27 stories linked to their parent epics
+0 failures
+
+epics #1
+epics #2
+epics #3
+epics #4
+epics #5
+epics #6
+epics #7
+epics #8
+

@@ -1,0 +1,6 @@
+hatchling==1.27.0
+pydantic==2.11.9
+pytest==8.4.2
+rfc8785==0.1.4
+ruff==0.13.0
+uuid6==2025.0.1
