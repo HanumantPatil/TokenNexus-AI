@@ -20,18 +20,18 @@ a production HTTP host or live model provider.
 
 ```mermaid
 flowchart LR
-	 Caller[Caller] --> Contract[Strict public contract]
-	 Contract --> Normalize[Normalize and fingerprint]
-	 Normalize --> Journal[Atomic journal claim]
-	 Journal --> Coordinator[Coordinator]
-	 Coordinator --> Guard[Cancellation and deadline guards]
-	 Coordinator --> Budget[Budget port]
-	 Coordinator --> Model[Model port]
-	 Coordinator --> Quality[Quality evaluator]
-	 Model --> Economical[Economical alias]
-	 Model --> Capable[Capable alias]
-	 Coordinator --> Result[Immutable public result]
-	 Result --> Journal
+  Caller[Caller] --> Contract[Strict public contract]
+  Contract --> Normalize[Normalize and fingerprint]
+  Normalize --> Journal[Atomic journal claim]
+  Journal --> Coordinator[Coordinator]
+  Coordinator --> Guard[Cancellation and deadline guards]
+  Coordinator --> Budget[Budget port]
+  Coordinator --> Model[Model port]
+  Coordinator --> Quality[Quality evaluator]
+  Model --> Economical[Economical alias]
+  Model --> Capable[Capable alias]
+  Coordinator --> Result[Immutable public result]
+  Result --> Journal
 ```
 
 The design follows ports and adapters. Domain contracts and orchestration policy do
@@ -41,7 +41,7 @@ replace each protocol implementation without moving policy into infrastructure c
 ### Component Map
 
 | Module | Responsibility |
-|---|---|
+| --- | --- |
 | `contracts.py` | Frozen Pydantic request, result, usage, money, quality, and RFC 9457 contracts |
 | `coordinator.py` | Admission, guards, reservations, dispatch, retry, quality evaluation, escalation, and terminalization |
 | `fingerprint.py` | Request normalization, RFC 8785 canonical JSON, and SHA-256 fingerprints |
@@ -57,22 +57,22 @@ replace each protocol implementation without moving policy into infrastructure c
 ### Request Lifecycle
 
 1. `PublicRequest` validates schema version `1.0.0`, rejects unknown fields, and
-	applies deterministic defaults.
+   applies deterministic defaults.
 2. `normalize_request` adds the authenticated scope and a UUIDv7 request identifier.
 3. `request_fingerprint` hashes the normalized caller-controlled projection using RFC
-	8785 canonical JSON and SHA-256.
+   8785 canonical JSON and SHA-256.
 4. `Journal.claim` atomically admits the scoped idempotency key, returns an existing
-	run, or reports a fingerprint conflict.
+   run, or reports a fingerprint conflict.
 5. `Coordinator` checks cancellation and the absolute monotonic deadline before
-	controlled work.
+   controlled work.
 6. The budget port reserves worst-case cost before each model dispatch or quality
-	evaluation.
+   evaluation.
 7. The economical alias executes first. One centralized transient retry may be used
-	across the request.
+   across the request.
 8. The quality evaluator returns facts only. A below-threshold score can trigger one
-	capable-model attempt when the remaining policy constraints permit it.
+   capable-model attempt when the remaining policy constraints permit it.
 9. The coordinator creates a canonical UTC result and atomically commits the first
-	terminal state. Later exact replays return that stored result.
+   terminal state. Later exact replays return that stored result.
 
 ### Core Contracts
 
@@ -112,13 +112,13 @@ outside the public contract.
 The implemented core reduces avoidable model work rather than truncating every prompt:
 
 * Economical-first routing avoids a capable-model call when the first result meets the
-	configured quality threshold.
+  configured quality threshold.
 * Scoped idempotency returns an existing terminal result without another model call,
-	quality evaluation, or budget reservation.
+  quality evaluation, or budget reservation.
 * One escalation and one centralized transient retry bound the maximum amount of
-	repeated model work.
+  repeated model work.
 * Input and output token ceilings travel with each normalized request so a production
-	model adapter can enforce them at the provider boundary.
+  model adapter can enforce them at the provider boundary.
 
 The result reports aggregate model usage in `decision_summary.usage`. Token savings
 must be calculated against a defined baseline with the same request, model versions,
@@ -134,7 +134,7 @@ quality check. Repeating the same request with the same scope and idempotency ke
 returns the stored result without new effects.
 
 | Observed metric | Initial execution | Exact replay | Replay savings |
-|---|---:|---:|---:|
+| --- | ---: | ---: | ---: |
 | Model calls | 1 | 0 additional | 1 avoided |
 | Quality evaluations | 1 | 0 additional | 1 avoided |
 | Model input tokens | 10 | 0 additional | 10 avoided |
@@ -146,7 +146,7 @@ For this duplicate-request scenario, the incremental token reduction is:
 
 $$
 \frac{15\ \text{baseline duplicate tokens} - 0\ \text{replay tokens}}
-		 {15\ \text{baseline duplicate tokens}} \times 100 = 100\%
+     {15\ \text{baseline duplicate tokens}} \times 100 = 100\%
 $$
 
 Run the evidence test directly:
@@ -209,7 +209,7 @@ enforceable.
 ## Repository Layout
 
 | Path | Contents |
-|---|---|
+| --- | --- |
 | `src/tokennexus/` | Public package, contracts, policy, ports, state, and adapters |
 | `tests/contracts/` | Contract, fingerprint, reason, and problem-details tests |
 | `tests/orchestration/` | Coordinator, replay, budget, retry, escalation, and adapter tests |
@@ -239,8 +239,9 @@ PowerShell:
 ```powershell
 py -3.11 -m venv .venv-x64
 uv pip install --python .venv-x64\Scripts\python.exe --index-url https://packagefeedproxy.microsoft.io/pypi/simple/ -r requirements.txt
+uv pip install --python .venv-x64\Scripts\python.exe --no-deps --no-build-isolation .
 .venv-x64\Scripts\python.exe -m pytest -q
-.venv-x64\Scripts\ruff.exe check src tests
+.venv-x64\Scripts\ruff.exe check src tests test.py
 ```
 
 ### Run the Local Application
@@ -284,8 +285,5 @@ The question "What credentials and environment setup do I need, and how do I run
 locally?" is not Mermaid syntax. Open the README as Markdown, or submit that question
 to chat instead of the Mermaid preview command.
 
-
-
-
-
-
+Only fenced blocks beginning with a Mermaid diagram declaration should be sent to the
+Mermaid preview command.

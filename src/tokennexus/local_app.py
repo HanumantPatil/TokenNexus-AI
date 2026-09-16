@@ -139,9 +139,6 @@ class LocalRequestHandler(BaseHTTPRequestHandler):
         result = self.coordinator.execute(request, scope_id=scope_id)
         self._write_json(HTTPStatus.OK, result.model_dump(mode="json"))
 
-    def log_message(self, message_format: str, *args: object) -> None:
-        print(f"{self.address_string()} - {message_format % args}")
-
     def _content_length(self) -> int | None:
         value = self.headers.get("Content-Length")
         try:
