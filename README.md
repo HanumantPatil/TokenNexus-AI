@@ -17,6 +17,47 @@ request fingerprinting, atomic in-memory idempotency, immutable state transition
 deterministic model and quality adapters, and safe public errors. It does not include
 a production HTTP host or live model provider.
 
+## Problem We Solve
+
+Enterprise AI applications often assign every request to one model or default to the
+most capable model. That approach spends more than necessary on routine work. Blunt
+token or cost caps create the opposite problem: they can prevent important requests
+from receiving enough model capability to meet their quality target.
+
+Cost dashboards usually explain spend after execution, while routing, retries, and
+quality controls are reimplemented differently in each application. As model and tool
+calls multiply, teams lose predictable request economics and cannot reliably explain
+why a particular execution path was allowed.
+
+TokenNexus addresses this as a runtime control-plane problem. It optimizes business
+value per token by choosing the least expensive eligible path before paid work starts,
+without treating cost as more important than declared quality, latency, budget, and
+governance constraints.
+
+## How TokenNexus Solves It
+
+For each request, the implemented orchestration core:
+
+1. Validates and normalizes a provider-neutral request contract.
+2. Freezes the active policy and pricing versions so the decision remains reproducible.
+3. Evaluates economical and capable model aliases against quality, latency,
+   governance, availability, and budget gates.
+4. Selects the preferred funded path, safely downgrades when allowed, or blocks before
+   disallowed paid work begins.
+5. Atomically reserves cost, input tokens, output tokens, duration, and tool-call
+   allowances before every physical model or quality operation.
+6. Evaluates output quality and permits at most one governed escalation when the
+   economical result is insufficient.
+7. Records an immutable decision summary with model alias, policy and pricing
+   versions, estimated cost, eligibility gates, and stable reason codes.
+8. Returns the exact stored result for an idempotent replay without repeating paid
+   work or reevaluating under a newer policy.
+
+The current local application demonstrates these controls with deterministic adapters
+and in-memory stores. Live model integrations, semantic caching, durable persistence,
+production authentication, and telemetry export are planned integration boundaries,
+not capabilities claimed by this implementation.
+
 ## Architecture
 
 ```mermaid
